@@ -1,93 +1,136 @@
-from bs4 import BeautifulSoup
-import requests, re, json, sys, os
+from selenium import webdriver
+from selenium.webdriver.firefox.options import Options
+from selenium.webdriver.support.ui import WebDriverWait
+from selenium.webdriver.support import expected_conditions as EC
+from selenium.webdriver.common.by import By
+import time, sys, os, json
 
-def logError(log):
-    print(log)
-    input('Press enter to exit...')
-    sys.exit()
 
-if len(sys.argv) < 3:
-    logError("Error: Not enough arguments given.\nUsage: python quizlet-dl [URL] [Save Directory]")
+
+def scrollDown(driver): #Scroll to load all the sets within a user page
+    last_height = driver.execute_script('return document.body.scrollHeight')
+    while True:
+        scrollTo = str(driver.execute_script('return document.body.scrollHeight')) #Scroll to the very bottom of the page
+        driver.execute_script('window.scrollTo(0, document.body.scrollHeight)')
+        time.sleep(1)
+        new_height = driver.execute_script('return document.body.scrollHeight')
+
+        if new_height == last_height: #If scrolling resulted in no change, return the function
+            return
+        last_height = new_height
+
+
+def scrapeUser(driver): #Scrapes an entire user page
+    sets_raw = []
+    sets = []
+
+    #Get number of sets within page via the Xpath
+    numOfSets = driver.find_element_by_xpath('/html/body/div[3]/div[2]/div/div/section/div/div[1]/div/div/div/div/div[2]/div[2]/div/span[1]/span').text[9:-1]
+    numOfSets = int(numOfSets)
     
-url = sys.argv[1]
-headers = {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/78.0.3904.97 Safari/537.36',
-    }
+    while len(sets) != numOfSets: #Keep discovering sets until the number of sets discovered equals the number of sets stated at the top of the user page
+        for set_ in driver.find_elements_by_class_name('DashboardListItem'):
+            foo = set_.find_elements_by_class_name('UILink')[0]
+            if foo not in sets_raw:
+                sets_raw.append(foo)
+                sets.append(foo.get_attribute('href'))
+        scrollDown(driver)
 
-try:
-    response = requests.get(url, headers)    #Perform GET request to command-line argument specified URL
-except requests.exceptions.MissingSchema:
-    logError("Error: Invalid URL. Make sure you include 'http://' or 'https://' in your argument.")
-except:
-    logError("Unexpected error: ", sys.exc_info()[0])
+    for set_ in sets: #Scrape every set within the user page
+        print(set_)
+        driver.get(set_) #Load the set within the browser
+        scrapeSet(driver)
 
-if response == 0:   #No response received
-    logError('Unable to get response.')
+
+def scrapeSet(driver): #Scrape a single set of cards
+    driver.execute_script('window.scrollTo(0, 400)') #Scroll to *almost* the bottom. Needed to load the "see more" button
+
+    source = driver.page_source
+    source = source[source.find('Terms in this set') + 19 : -1] #Manually find the # of cards within the set
+    numOfCards = source[0:source.find(')')]                     #May be a better way to do this within Selenium, but the XPath appears
+                                                                #to change for each set, so this will work for now.
+
+    seeMore = driver.find_elements_by_class_name('SetPageTerms-seeMore')
+    if seeMore: #If a "see more" button exists, click it
+        print('I see the button')
+        seeMore[0].click()
+
+    #Add all terms and definitions to their corresponding list
+    while True:
+        try:
+            terms, definitions = [], []
+            for term in driver.find_elements_by_class_name('SetPageTerm-wordText'):
+                terms.append(term.text)
+            for definition in driver.find_elements_by_class_name('SetPageTerm-definitionText'):
+                definitions.append(definition.text)
+            break
+        except:
+            time.sleep(0.25)
+    if len(terms) != len(definitions):
+            print('ERROR: Number of terms does not match number of definitions.')
+            print('ERROR: Number of terms does not match to number of total cards.')
+            return None
+
+    cards = []
+    for i in range(0,len(terms)):
+        cards.append({terms[i]:definitions[i]})
+
+    saveCards(terms, definitions, driver)
+
+def saveCards(terms, definitions, driver):
+    title = driver.find_element_by_xpath('/html/body/div[3]/div[2]/div[1]/div[2]/div/div[1]/div[1]/div/div/div[1]/h1').text
+    user = driver.find_element_by_class_name('UserLink-username').text
+    id_ = driver.current_url.split('/')[-3]
+
+    invalid_chars = ['/','\\',':','?','\"','<','>','|']
+    for i in invalid_chars:
+        title = title.replace(i, '')
+        user = user.replace(i, '')
+
+    data = [] #Data to be output in JSON
+    data.append({'title':title})
+
+    cards = []
+    for i in range(0,len(terms)):
+        cards.append({terms[i]:definitions[i]})
+    data.append({'cards':cards})
+
+    basedir = sys.argv[2].replace('\\', '/')
+    if basedir[-1] == '/':
+        basedir = basedir[0:-1]
+    jsondir = '{}/{}/'.format(basedir, user)
+
+    try:
+        os.mkdir(jsondir)
+    except FileExistsError:
+        pass
+    except PermissionError:
+        print('Permission denied - try running as an administrator')
+        input('Press enter to exit...')
+        sys.exit()
+    except FileNotFoundError:
+        print('Error: Make sure your directory is correct and you are specifying the full path.')
+        input('Press enter to exit...')
+        sys.exit()
+
+    with open(jsondir+title+' - '+id_+'.json', 'w+') as fp:
+        json.dump(data, fp, sort_keys=True, indent=4)
     
-status_codes = [404, 403, 429]
-if response.status_code in status_codes:    #If negative staus code received, exit
-    print("Error: Status code {} received.".format(response.status_code))
-    input("Press enter to exit...")
-    sys.exit()
-    
-html_doc = response.text    #Convert to html and pass into BeautifulSoup constructor
-soup = BeautifulSoup(html_doc, "html.parser")
+def main():
+    try:
+        opts = Options()
+        opts.headless = True
+        path = '\\'.join(os.path.realpath(__file__).split('\\')[0:-1])
+        driver = webdriver.Firefox(executable_path = path+'\\geckodriver.exe',
+                                   options=opts)
 
-terms = []
-definitions = []
-cards = soup.find('div', class_=re.compile('SetPage-setDetailsTerms'))  #Isolate cards
+        driver.get(sys.argv[1])
+        if driver.find_elements_by_class_name('ProfileHeader-user'):
+            scrapeUser(driver)
+        else:
+            scrapeSet(driver)
+    finally:
+        driver.quit()
 
-def parseCards(z):  #Return either a list of terms, or a list of definitions
-    a = []
-    for x in cards.find_all('a', class_=re.compile(z)):
-        x = str(x).replace('<br/>','\n')
-        x = BeautifulSoup(x, 'html.parser').get_text()
-        a.append(x)
-    return a
-
-terms = parseCards('SetPageTerm-wordText')
-definitions = parseCards('SetPageTerm-definitionText')
-
-title = soup.find('div', class_=re.compile('SetPage-setTitle')).get_text()  #Get title
-user = soup.find('span', class_=re.compile('UserLink-username')).get_text() #Get username
-
-invalid_chars = ['/','\\',':','?','\"','<','>','|']
-for i_ in invalid_chars:    #Remove any characters from title and username that don't play nicely with the Windows filesystem
-    title = title.replace(i_,'')
-    uesr = user.replace(i_,'')
-
-cards = []
-data = []   #Will contain all data to be output in JSON format
-data.append({"title":title})    #Add title object to data
-data.append({"user":user})      #Add user object to data
-
-for i in range(0, len(terms)):  #Add all terms and definitions as corresponding members
-    cards.append({terms[i]:definitions[i]})
-data.append({"cards":cards})
-
-
-if sys.argv[2][-1] != "/": #If no "/" at the end of the given output directory, put it there
-    sys.argv[2] += "/"
-
-jsondir = "{}/{}".format(sys.argv[2],user) #Set output directory
-
-try:
-    os.mkdir(jsondir)   #Create download directory
-except FileExistsError: #If the download directory already exists, pass
-    pass
-except PermissionError:
-    print("Permission denied - either try a different directory, or run as admin.")
-    input("Press enter to exit...")
-    sys.exit()
-except FileNotFoundError:
-    print("FileNotFoundError - Make sure your directory is correct and you are specifying the full path.")
-    input("Press enter to exit...")
-    sys.exit()
-except:
-    print("Unexpected error: ", sys.exc_info()[0])
-    input("Press enter to exit...")
-    sys.exit()
-
-
-with open(jsondir+title+".json", "w+") as fp: #Ouput all data in JSON format
-    json.dump(data,fp,sort_keys=True,indent=4)
+if __name__ == '__main__':
+    main()
