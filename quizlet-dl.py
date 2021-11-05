@@ -78,7 +78,8 @@ def scrapeSet(driver): #Scrape a single set of cards
     saveCards(terms, definitions, driver)
 
 def saveCards(terms, definitions, driver):
-    title = driver.find_element_by_xpath('/html/body/div[3]/div[2]/div[1]/div[2]/div/div[1]/div[1]/div/div/div[1]/h1').text
+    # new method to extract title
+    title = driver.find_elements_by_class_name('UIHeading--one')[0].text
     user = driver.find_element_by_class_name('UserLink-username').text
     id_ = driver.current_url.split('/')[-3]
 
@@ -113,8 +114,16 @@ def saveCards(terms, definitions, driver):
         input('Press enter to exit...')
         sys.exit()
 
-    with open(jsondir+title+' - '+id_+'.json', 'w+') as fp:
+    pathFile = jsondir+title+' - '+id_+'.json'
+    with open(pathFile, 'w+') as fp:
         json.dump(data, fp, sort_keys=True, indent=4)
+    
+    # This render special characters (like the IPA ð) instead of having unicode string (like "\u00f0"): it's not efficient but couldn't find a way to do it directly when extracting the cards or on the "data" var
+    with open(pathFile) as content_file:
+        content = content_file.read()
+    content = content.encode().decode('unicode-escape').encode("utf8")
+    with open(pathFile, "wb") as text_file:
+        text_file.write(content)
     
 def main():
     try:
